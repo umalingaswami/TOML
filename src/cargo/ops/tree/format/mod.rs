@@ -2,6 +2,8 @@ use std::fmt;
 
 use anyhow::{Error, bail};
 
+use crate::ops::tree::graph::NodePackage;
+
 use self::parse::{Parser, RawChunk};
 use super::{Graph, Node, NodeId};
 
@@ -60,11 +62,11 @@ impl<'a> fmt::Display for Display<'a> {
     fn fmt(&self, fmt: &mut fmt::Formatter<'_>) -> fmt::Result {
         let node = self.graph.node(self.node_index);
         match node {
-            Node::Package {
+            Node::Package(NodePackage {
                 package_id,
                 features,
                 ..
-            } => {
+            }) => {
                 let package = self.graph.package_for_id(*package_id);
                 for chunk in &self.pattern.0 {
                     match chunk {
@@ -117,7 +119,7 @@ impl<'a> fmt::Display for Display<'a> {
             Node::Feature { name, node_index } => {
                 let for_node = self.graph.node(*node_index);
                 match for_node {
-                    Node::Package { package_id, .. } => {
+                    Node::Package(NodePackage { package_id, .. }) => {
                         write!(fmt, "{} feature \"{}\"", package_id.name(), name)?;
                         if self.graph.is_cli_feature(self.node_index) {
                             write!(fmt, " (command-line)")?;

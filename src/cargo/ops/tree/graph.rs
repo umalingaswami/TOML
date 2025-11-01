@@ -6,9 +6,11 @@ use crate::core::dependency::DepKind;
 use crate::core::resolver::Resolve;
 use crate::core::resolver::features::{CliFeatures, FeaturesFor, ResolvedFeatures};
 use crate::core::{FeatureMap, FeatureValue, Package, PackageId, PackageIdSpec, Workspace};
-use crate::util::CargoResult;
 use crate::util::interning::{INTERNED_DEFAULT, InternedString};
+use crate::util::{CargoResult, OptVersionReq};
+use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
+use std::hash::{Hash, Hasher};
 
 #[derive(Debug, Copy, Clone)]
 pub struct NodeId {
@@ -49,14 +51,55 @@ impl std::hash::Hash for NodeId {
     }
 }
 
+#[derive(Debug, Clone)]
+pub struct NodePackage {
+    pub package_id: PackageId,
+    /// Features that are enabled on this package.
+    pub features: Vec<InternedString>,
+    pub kind: CompileKind,
+    // ignore in equality/hash/ordering as it is only informational
+    pub version_req: OptVersionReq,
+}
+
+impl PartialEq for NodePackage {
+    fn eq(&self, other: &Self) -> bool {
+        self.package_id == other.package_id
+            && self.features == other.features
+            && self.kind == other.kind
+        // ignore version_req
+    }
+}
+
+impl Eq for NodePackage {}
+
+impl PartialOrd for NodePackage {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for NodePackage {
+    fn cmp(&self, other: &Self) -> Ordering {
+        self.package_id
+            .cmp(&other.package_id)
+            .then_with(|| self.features.cmp(&other.features))
+            .then_with(|| self.kind.cmp(&other.kind))
+        // ignore version_req
+    }
+}
+
+impl Hash for NodePackage {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.package_id.hash(state);
+        self.features.hash(state);
+        self.kind.hash(state);
+        // ignore version_req
+    }
+}
+
 #[derive(Debug, Clone, Eq, PartialEq, Hash, Ord, PartialOrd)]
 pub enum Node {
-    Package {
-        package_id: PackageId,
-        /// Features that are enabled on this package.
-        features: Vec<InternedString>,
-        kind: CompileKind,
-    },
+    Package(NodePackage),
     Feature {
         /// Index of the package node this feature is for.
         node_index: NodeId,
@@ -68,7 +111,7 @@ pub enum Node {
 impl Node {
     fn name(&self) -> InternedString {
         match self {
-            Self::Package { package_id, .. } => package_id.name(),
+            Self::Package(NodePackage { package_id, .. }) => package_id.name(),
             Self::Feature { name, .. } => *name,
         }
     }
@@ -218,7 +261,7 @@ impl<'a> Graph<'a> {
             .iter()
             .enumerate()
             .filter(|(_i, node)| match node {
-                Node::Package { package_id, .. } => package_ids.contains(package_id),
+                Node::Package(NodePackage { package_id, .. }) => package_ids.contains(package_id),
                 _ => false,
             })
             .map(|(i, node)| (node, NodeId::new(i, node.name())))
@@ -235,7 +278,7 @@ impl<'a> Graph<'a> {
 
     fn package_id_for_index(&self, index: NodeId) -> PackageId {
         match self.node(index) {
-            Node::Package { package_id, .. } => *package_id,
+            Node::Package(NodePackage { package_id, .. }) => *package_id,
             Node::Feature { .. } => panic!("unexpected feature node"),
         }
     }
@@ -314,7 +357,7 @@ impl<'a> Graph<'a> {
         // Collect a map of package name to Vec<(&Node, NodeId)>.
         let mut packages = HashMap::new();
         for (i, node) in self.nodes.iter().enumerate() {
-            if let Node::Package { package_id, .. } = node {
+            if let Node::Package(NodePackage { package_id, .. }) = node {
                 packages
                     .entry(package_id.name())
                     .or_insert_with(Vec::new)
@@ -329,17 +372,19 @@ impl<'a> Graph<'a> {
                     .into_iter()
                     .map(|(node, _)| {
                         match node {
-                            Node::Package {
+                            Node::Package(NodePackage {
                                 package_id,
                                 features,
+                                version_req,
                                 ..
-                            } => {
+                            }) => {
                                 // Do not treat duplicates on the host or target as duplicates.
-                                Node::Package {
+                                Node::Package(NodePackage {
                                     package_id: package_id.clone(),
                                     features: features.clone(),
                                     kind: CompileKind::Host,
-                                }
+                                    version_req: version_req.clone(),
+                                })
                             }
                             _ => unreachable!(),
                         }
@@ -376,12 +421,14 @@ pub fn build<'a>(
         let member_id = member.package_id();
         let features_for = FeaturesFor::from_for_host(member.proc_macro());
         for kind in requested_kinds {
+            let version_req = OptVersionReq::Any;
             let member_index = add_pkg(
                 &mut graph,
                 resolve,
                 resolved_features,
                 member_id,
                 features_for,
+                version_req,
                 target_data,
                 *kind,
                 opts,
@@ -409,6 +456,7 @@ fn add_pkg(
     resolved_features: &ResolvedFeatures,
     package_id: PackageId,
     features_for: FeaturesFor,
+    version_req: OptVersionReq,
     target_data: &RustcTargetData<'_>,
     requested_kind: CompileKind,
     opts: &TreeOptions,
@@ -419,11 +467,12 @@ fn add_pkg(
         FeaturesFor::ArtifactDep(target) => CompileKind::Target(target),
         FeaturesFor::NormalOrDev => requested_kind,
     };
-    let node = Node::Package {
+    let node = Node::Package(NodePackage {
         package_id,
         features: node_features,
         kind: node_kind,
-    };
+        version_req: version_req,
+    });
     if let Some(idx) = graph.index.get(&node) {
         return *idx;
     }
@@ -513,12 +562,14 @@ fn add_pkg(
                     }
                 }
             };
+            let dep_version_req = dep.version_req().clone();
             let dep_index = add_pkg(
                 graph,
                 resolve,
                 resolved_features,
                 dep_id,
                 dep_features_for,
+                dep_version_req,
                 target_data,
                 requested_kind,
                 opts,

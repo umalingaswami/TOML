@@ -6,6 +6,7 @@ use crate::core::dependency::DepKind;
 use crate::core::resolver::{ForceAllTargets, HasDevUnits, features::CliFeatures};
 use crate::core::{Package, PackageId, PackageIdSpec, PackageIdSpecQuery, Workspace};
 use crate::ops::resolve::SpecsAndResolvedFeatures;
+use crate::ops::tree::graph::NodePackage;
 use crate::ops::{self, Packages};
 use crate::util::CargoResult;
 use crate::util::style;
@@ -442,7 +443,7 @@ fn print_dependencies<'a>(
         .filter(|dep| {
             // Filter out packages to prune.
             match graph.node(dep.node()) {
-                Node::Package { package_id, .. } => {
+                Node::Package(NodePackage { package_id, .. }) => {
                     if filter_non_workspace_member && !ws.is_member_id(*package_id) {
                         return false;
                     }
