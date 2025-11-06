@@ -2118,11 +2118,15 @@ fn vendor_rename_fallback() {
 ...
 [..]failed to `mv "[..]vendor[..].vendor-staging[..]log-0.3.5" "[..]vendor[..]log"`: [..]
 ...
-[..]StripPrefixError[..]
+Caused by:
+  failed to copy vendored sources for log v0.3.5
+
+Caused by:
+  failed to create directory[..]
 ...
 "#]])
         .run();
 
-    // The cp_sources fallback didn't work because of the StripPrefixError
+    // The cp_sources fallback didn't work because the vendor/log file still exists, not becuase of StripPrefixError
     assert!(!p.root().join("vendor/log/Cargo.toml").exists());
 }
